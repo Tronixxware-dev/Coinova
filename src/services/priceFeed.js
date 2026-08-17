@@ -1,81 +1,98 @@
-const WebSocket = require('ws');
 const redis = require('../config/redis');
 const { processTick } = require('./orderEngine');
 
-// Symbols this app offers for trading. Extend as needed — each one
-// needs to be a valid Binance trading pair (lowercase for the stream URL).
+// Symbols this app offers for trading. Kept in the same lowercase
+// Binance-pair format as before ('btcusdt', etc.) so anything else in
+// the app that imports SYMBOLS keeps working unchanged.
 const SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt'];
 
-const BINANCE_STREAM_URL =
-  'wss://stream.binance.com:9443/stream?streams=' +
-  SYMBOLS.map((s) => `${s}@trade`).join('/');
+// Maps each symbol to its CoinGecko coin id so we can pull a live USD
+// price for it.
+const COINGECKO_IDS = {
+  btcusdt: 'bitcoin',
+  ethusdt: 'ethereum',
+  solusdt: 'solana',
+  bnbusdt: 'binancecoin',
+  xrpusdt: 'ripple',
+};
 
-const RECONNECT_DELAY_MS = 3000;
+// CoinGecko's free public API works fine from cloud-hosted servers
+// (Render, Vercel, etc.) — unlike Binance, which blocks connections
+// from most cloud/datacenter IP ranges. The fully anonymous version of
+// this endpoint shares a fairly tight rate limit across everyone
+// hitting it without a key, which is easy to trip — especially from a
+// shared hosting IP range like Render's. A free CoinGecko Demo API key
+// (no credit card needed) raises that to a guaranteed 30 calls/minute,
+// which is very comfortable since we only make ~6-10 calls/minute
+// (one combined request for all symbols per poll). The app still works
+// without a key, just with a higher chance of an occasional 429 that
+// self-heals on the next poll.
+const POLL_INTERVAL_MS = 10000;
+
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
+
+const COINGECKO_URL =
+  'https://api.coingecko.com/api/v3/simple/price?ids=' +
+  Object.values(COINGECKO_IDS).join(',') +
+  '&vs_currencies=usd';
 
 /**
- * Starts the price feed. `onPrice(symbol, price)` is called on every
- * tick so the caller (index.js) can broadcast it to connected frontend
- * clients over its own WebSocket server.
+ * Starts the price feed. `onPrice(symbol, price)` is called for every
+ * symbol on every poll so the caller (index.js) can broadcast it to
+ * connected frontend clients over its own WebSocket server.
  */
 function startPriceFeed(onPrice) {
-  connect(onPrice);
+  console.log(
+    'Starting CoinGecko price polling for:',
+    SYMBOLS.join(', ').toUpperCase(),
+    COINGECKO_API_KEY ? '(using API key)' : '(no API key — set COINGECKO_API_KEY to raise rate limits)'
+  );
+  poll(onPrice);
+  setInterval(() => poll(onPrice), POLL_INTERVAL_MS);
 }
 
-async function handleTick(raw, onPrice) {
-  const parsed = JSON.parse(raw.toString());
-  const trade = parsed.data;
-  if (!trade || trade.e !== 'trade') return;
+// Chains polls onto a single promise so a slow/hanging fetch can't
+// overlap with the next interval and pile up concurrent Postgres pool
+// connections (max: 10 in config/db.js).
+let queue = Promise.resolve();
 
-  const symbol = trade.s; // e.g. 'BTCUSDT'
-  // Keep Binance's raw decimal string all the way through the money
-  // math (Redis cache + order engine) — parseFloat'ing it here would
-  // round it to a binary float before it ever reaches Decimal, which
-  // defeats the point of doing exact decimal arithmetic downstream.
-  const priceStr = trade.p;
-
-  // Cache latest price for the order engine / REST reads.
-  await redis.set(`price:${symbol}`, priceStr);
-
-  // Check pending limit/stop orders against this new price.
-  await processTick(symbol, priceStr);
-
-  // Let the caller push this out to connected frontend clients —
-  // a plain number is fine here since this leg is display-only.
-  onPrice(symbol, parseFloat(priceStr));
+function poll(onPrice) {
+  queue = queue
+    .then(() => fetchAndBroadcast(onPrice))
+    .catch((err) => {
+      console.error('Error fetching prices from CoinGecko:', err.message);
+    });
 }
 
-function connect(onPrice) {
-  const ws = new WebSocket(BINANCE_STREAM_URL);
+async function fetchAndBroadcast(onPrice) {
+  const headers = COINGECKO_API_KEY ? { 'x-cg-demo-api-key': COINGECKO_API_KEY } : {};
+  const res = await fetch(COINGECKO_URL, { headers });
+  if (!res.ok) {
+    throw new Error(`CoinGecko responded with ${res.status}`);
+  }
+  const data = await res.json();
 
-  ws.on('open', () => {
-    console.log('Connected to Binance price stream:', SYMBOLS.join(', ').toUpperCase());
-  });
+  for (const symbol of SYMBOLS) {
+    const coingeckoId = COINGECKO_IDS[symbol];
+    const usd = data[coingeckoId]?.usd;
+    if (usd === undefined) continue;
 
-  // Binance can fire many trade ticks per second across these symbols.
-  // `ws`'s 'message' event doesn't wait for an async handler to finish
-  // before firing the next one, so without this chain, a burst of ticks
-  // would kick off that many concurrent processTick() calls, each
-  // grabbing its own Postgres pool connection — easily exhausting the
-  // pool (max: 10 in config/db.js) and timing out. Chaining onto
-  // `queue` forces ticks to be handled one at a time instead, so at
-  // most one pool connection is ever in use for this work.
-  let queue = Promise.resolve();
+    const binanceStyleSymbol = symbol.toUpperCase(); // e.g. 'BTCUSDT'
+    const priceStr = String(usd);
 
-  ws.on('message', (raw) => {
-    queue = queue
-      .then(() => handleTick(raw, onPrice))
-      .catch((err) => console.error('Error processing price tick:', err));
-  });
+    try {
+      // Cache latest price for the order engine / REST reads.
+      await redis.set(`price:${binanceStyleSymbol}`, priceStr);
 
-  ws.on('close', () => {
-    console.warn(`Price feed disconnected — reconnecting in ${RECONNECT_DELAY_MS}ms`);
-    setTimeout(() => connect(onPrice), RECONNECT_DELAY_MS);
-  });
+      // Check pending limit/stop orders against this new price.
+      await processTick(binanceStyleSymbol, priceStr);
 
-  ws.on('error', (err) => {
-    console.error('Price feed WebSocket error:', err.message);
-    ws.close();
-  });
+      // Let the caller push this out to connected frontend clients.
+      onPrice(binanceStyleSymbol, usd);
+    } catch (err) {
+      console.error(`Error processing price tick for ${binanceStyleSymbol}:`, err.message);
+    }
+  }
 }
 
 module.exports = { startPriceFeed, SYMBOLS };
