@@ -14,6 +14,16 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
+router.get('/history', requireAuth, async (req, res) => {
+  try {
+    const history = await stakingService.getStakingHistory(req.user.id);
+    res.json(history);
+  } catch (err) {
+    console.error('Get staking history error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/stake', requireAuth, async (req, res) => {
   try {
     const result = await stakingService.stake(req.user.id, req.body);
