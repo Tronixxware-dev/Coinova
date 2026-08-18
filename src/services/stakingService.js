@@ -1,24 +1,13 @@
 const pool = require('../config/db');
 
-// Fixed-term staking: choose a lock duration and an amount; the daily
-// interest rate depends on BOTH — longer locks and larger amounts earn
-// a higher rate. The rate is snapshotted onto the stake row at creation
-// time, so later changes to this table never affect existing stakes.
-// Interest accrues once per elapsed day and freezes at the duration's
-// cap — leaving a matured stake unclaimed doesn't earn extra, it just
-// sits there fully withdrawable.
-
 const MIN_STAKE_AMOUNT = 50;
 
-// Ordered smallest-to-largest; a stake's tier is the highest one whose
-// `min` it meets or exceeds.
 const AMOUNT_TIERS = [
   { min: 50, label: '$50 – $999.99' },
   { min: 1000, label: '$1,000 – $9,999.99' },
   { min: 10000, label: '$10,000+' },
 ];
 
-// `rates[i]` is the daily rate for AMOUNT_TIERS[i] at this duration.
 const DURATION_PLANS = [
   { durationDays: 7, label: '7 Days', rates: [0.005, 0.0075, 0.01] },
   { durationDays: 30, label: '30 Days (1 Month)', rates: [0.01, 0.015, 0.02] },
@@ -43,8 +32,6 @@ function getDailyRate(durationDays, amount) {
   return plan.rates[tierIndex];
 }
 
-// Public shape describing every plan/tier combination, for the
-// frontend to render a picker with an accurate live-rate preview.
 function listPlans() {
   return DURATION_PLANS.map((plan) => ({
     durationDays: plan.durationDays,
@@ -108,6 +95,23 @@ async function getStakingSummary(userId) {
   };
 }
 
+async function getStakingHistory(userId) {
+  const result = await pool.query(
+    `SELECT * FROM stake_withdrawals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
+    [userId]
+  );
+  return {
+    withdrawals: result.rows.map((row) => ({
+      id: row.id,
+      stakeId: row.stake_id,
+      principal: row.principal,
+      interest: row.interest,
+      total: row.total,
+      createdAt: row.created_at,
+    })),
+  };
+}
+
 async function stake(userId, { amount, durationDays }) {
   const numericAmount = Number(amount);
   const numericDuration = Number(durationDays);
@@ -133,10 +137,6 @@ async function stake(userId, { amount, durationDays }) {
   }
 
   const dailyRate = getDailyRate(numericDuration, numericAmount);
-  // Computed here in JS (not via SQL interval arithmetic) so the query
-  // below never reuses one placeholder in two conflicting type
-  // contexts — that's what was causing the "inconsistent types deduced
-  // for parameter $3" error.
   const maturesAt = new Date(Date.now() + numericDuration * 24 * 60 * 60 * 1000);
 
   const client = await pool.connect();
@@ -234,6 +234,7 @@ async function withdrawStake(userId, stakeId) {
 
 module.exports = {
   getStakingSummary,
+  getStakingHistory,
   stake,
   withdrawStake,
   listPlans,
