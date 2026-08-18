@@ -132,4 +132,45 @@ router.delete('/', requireAuth, async (req, res) => {
   }
 });
 
+const MAX_AVATAR_DATA_URL_LENGTH = 2 * 1024 * 1024; // generous cap on the base64 string
+
+// PATCH /api/account/avatar
+router.patch('/avatar', requireAuth, async (req, res) => {
+  const { avatarDataUrl } = req.body;
+
+  if (!avatarDataUrl || typeof avatarDataUrl !== 'string' || !avatarDataUrl.startsWith('data:image/')) {
+    return res.status(400).json({ error: 'avatarDataUrl must be a data:image/... URL' });
+  }
+  if (avatarDataUrl.length > MAX_AVATAR_DATA_URL_LENGTH) {
+    return res.status(400).json({ error: 'Image is too large — please use a smaller photo' });
+  }
+
+  try {
+    const updateResult = await pool.query(
+      `UPDATE users SET avatar_data_url = $1 WHERE id = $2
+       RETURNING id, email, username, avatar_data_url AS "avatarDataUrl"`,
+      [avatarDataUrl, req.user.id]
+    );
+    res.json({ user: updateResult.rows[0] });
+  } catch (err) {
+    logger.error({ err }, 'Update avatar error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/account/avatar
+router.delete('/avatar', requireAuth, async (req, res) => {
+  try {
+    const updateResult = await pool.query(
+      `UPDATE users SET avatar_data_url = NULL WHERE id = $1
+       RETURNING id, email, username, avatar_data_url AS "avatarDataUrl"`,
+      [req.user.id]
+    );
+    res.json({ user: updateResult.rows[0] });
+  } catch (err) {
+    logger.error({ err }, 'Remove avatar error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

@@ -13,6 +13,7 @@ const tradeRoutes = require('./routes/trades');
 const orderbookRoutes = require('./routes/orderbook');
 const stakingRoutes = require('./routes/staking');
 const accountRoutes = require('./routes/account');
+const supportRoutes = require('./routes/support');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.use(
 
 app.use(cors());
 app.use(express.json());
+
 
 app.use(
   pinoHttp({
@@ -57,6 +59,7 @@ app.use('/api/trades', tradeRoutes);
 app.use('/api/orderbook', orderbookRoutes);
 app.use('/api/staking', stakingRoutes);
 app.use('/api/account', accountRoutes);
+app.use('/api/support', supportRoutes);
 
 app.use((err, req, res, next) => {
   logger.error({ err }, 'Unhandled error');
