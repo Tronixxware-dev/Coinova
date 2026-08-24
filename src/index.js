@@ -10,6 +10,9 @@ const http = require('http');
 const app = require('./app');
 const { startPriceFeed } = require('./services/priceFeed');
 const { createWsServer } = require('./services/wsServer');
+const { startTronDepositPoller } = require('./services/tronDepositPoller');
+const { startEthDepositPoller } = require('./services/ethDepositPoller');
+const { startBtcDepositPoller } = require('./services/btcDepositPoller');
 const pool = require('./config/db');
 const redis = require('./config/redis');
 
@@ -22,6 +25,16 @@ const { broadcastPrice, closeAll: closeWsServer } = createWsServer(httpServer);
 startPriceFeed((symbol, price) => {
   broadcastPrice(symbol, price);
 });
+
+// Watches every stored TRON deposit address for incoming USDT and
+// credits users' internal balances automatically.
+const tronPollHandle = startTronDepositPoller();
+
+// Same idea, for native ETH deposits on Sepolia.
+const ethPollHandle = startEthDepositPoller();
+
+// Same idea, for native BTC deposits on Bitcoin testnet4.
+const btcPollHandle = startBtcDepositPoller();
 
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
@@ -47,6 +60,9 @@ async function shutdown(signal) {
   forceExitTimer.unref();
 
   try {
+    clearInterval(tronPollHandle);
+    clearInterval(ethPollHandle);
+    clearInterval(btcPollHandle);
     closeWsServer();
     await new Promise((resolve, reject) => {
       httpServer.close((err) => (err ? reject(err) : resolve()));
