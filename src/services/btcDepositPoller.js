@@ -69,7 +69,7 @@ async function pollBtcDeposits() {
         }
       }
     } catch (err) {
-      console.error(`Error polling BTC deposits for ${address}:`, err.message);
+      console.error(`Error polling BTC deposits for ${address}:`, err.message, err.cause || '');
     }
   }
 }

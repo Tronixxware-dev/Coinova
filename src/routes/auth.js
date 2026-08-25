@@ -137,10 +137,11 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-   const result = await pool.query(
-  'SELECT id, email, username, password_hash, avatar_data_url AS "avatarDataUrl" FROM users WHERE email = $1',
-  [email]
-);
+    const result = await pool.query(
+      'SELECT id, email, username, password_hash, avatar_data_url AS "avatarDataUrl" FROM users WHERE email = $1',
+      [email]
+    );
+    const user = result.rows[0];
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -159,11 +160,11 @@ router.post('/login', async (req, res) => {
       [user.id, hashToken(refreshToken)]
     );
 
-   res.json({
-  user: { id: user.id, email: user.email, username: user.username, avatarDataUrl: user.avatarDataUrl },
-  accessToken,
-  refreshToken,
-});
+    res.json({
+      user: { id: user.id, email: user.email, username: user.username, avatarDataUrl: user.avatarDataUrl },
+      accessToken,
+      refreshToken,
+    });
   } catch (err) {
     logger.error({ err }, 'Login error');
     res.status(500).json({ error: 'Internal server error' });
