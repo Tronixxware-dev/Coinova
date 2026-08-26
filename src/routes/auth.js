@@ -18,7 +18,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const PG_UNIQUE_VIOLATION = '23505';
 
 const STARTING_BALANCES = {
-  USDT: 10000,
+  USDT: 0,
   BTC: 0,
   ETH: 0,
 };
