@@ -15,6 +15,7 @@ const stakingRoutes = require('./routes/staking');
 const accountRoutes = require('./routes/account');
 const supportRoutes = require('./routes/support');
 const depositRoutes = require('./routes/deposit');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 
@@ -62,6 +63,7 @@ app.use('/api/staking', stakingRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/deposit', depositRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.use((err, req, res, next) => {
   logger.error({ err }, 'Unhandled error');

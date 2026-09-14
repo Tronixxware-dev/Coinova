@@ -1,19 +1,39 @@
 const pool = require('../config/db');
 
-const MIN_STAKE_AMOUNT = 50;
+const MIN_STAKE_AMOUNT = 500;
+
+// Maximum single stake amount, by account tier. Tier 1 is the default for
+// every new user; an admin can upgrade a user to Tier 2 from the Admin
+// panel, which raises their max stake to 12,000.
+const TIER_MAX_STAKE = {
+  1: 6000,
+  2: 12000,
+};
+const DEFAULT_TIER = 1;
+
+function maxStakeForTier(tier) {
+  return TIER_MAX_STAKE[tier] ?? TIER_MAX_STAKE[DEFAULT_TIER];
+}
+
+async function getUserTier(userId) {
+  const result = await pool.query('SELECT tier FROM users WHERE id = $1', [userId]);
+  return result.rows[0]?.tier ?? DEFAULT_TIER;
+}
 
 const AMOUNT_TIERS = [
-  { min: 50, label: '$50 – $999.99' },
+  { min: 500, label: '$500 – $999.99' },
   { min: 1000, label: '$1,000 – $9,999.99' },
   { min: 10000, label: '$10,000+' },
 ];
 
+// Tier 1 (the $500–$999.99 bracket) is a flat 1.8%/day regardless of
+// duration. Tiers 2 and 3 keep their duration-scaled rates.
 const DURATION_PLANS = [
-  { durationDays: 7, label: '7 Days', rates: [0.005, 0.0075, 0.01] },
-  { durationDays: 30, label: '30 Days (1 Month)', rates: [0.01, 0.015, 0.02] },
-  { durationDays: 90, label: '90 Days (3 Months)', rates: [0.015, 0.0225, 0.03] },
-  { durationDays: 180, label: '180 Days (6 Months)', rates: [0.02, 0.03, 0.035] },
-  { durationDays: 365, label: '365 Days (1 Year)', rates: [0.025, 0.035, 0.04] },
+  { durationDays: 7, label: '7 Days', rates: [0.018, 0.0034, 0.0045] },
+  { durationDays: 30, label: '30 Days (1 Month)', rates: [0.018, 0.0068, 0.009] },
+  { durationDays: 90, label: '90 Days (3 Months)', rates: [0.018, 0.0101, 0.0135] },
+  { durationDays: 180, label: '180 Days (6 Months)', rates: [0.018, 0.0135, 0.0158] },
+  { durationDays: 365, label: '365 Days (1 Year)', rates: [0.018, 0.0158, 0.018] },
 ];
 
 function tierIndexForAmount(amount) {
@@ -59,16 +79,19 @@ function computeAccrued(stakeRow, now) {
 }
 
 async function getStakingSummary(userId) {
-  const result = await pool.query(
-    `SELECT * FROM stakes WHERE user_id = $1 AND status = 'ACTIVE' ORDER BY staked_at DESC`,
-    [userId]
-  );
+  const [stakesResult, tier] = await Promise.all([
+    pool.query(
+      `SELECT * FROM stakes WHERE user_id = $1 AND status = 'ACTIVE' ORDER BY staked_at DESC`,
+      [userId]
+    ),
+    getUserTier(userId),
+  ]);
 
   const now = new Date();
   let totalPrincipal = 0;
   let totalAccruedInterest = 0;
 
-  const stakes = result.rows.map((row) => {
+  const stakes = stakesResult.rows.map((row) => {
     const { daysElapsed, accrued, matured } = computeAccrued(row, now);
     totalPrincipal += Number(row.principal);
     totalAccruedInterest += accrued;
@@ -90,6 +113,8 @@ async function getStakingSummary(userId) {
     totalPrincipal,
     totalAccruedInterest,
     minStakeAmount: MIN_STAKE_AMOUNT,
+    maxStakeAmount: maxStakeForTier(tier),
+    tier,
     plans: listPlans(),
     stakes,
   };
@@ -123,6 +148,14 @@ async function stake(userId, { amount, durationDays }) {
   }
   if (numericAmount < MIN_STAKE_AMOUNT) {
     const err = new Error(`Minimum stake amount is ${MIN_STAKE_AMOUNT} USDT`);
+    err.status = 400;
+    throw err;
+  }
+
+  const tier = await getUserTier(userId);
+  const maxStakeAmount = maxStakeForTier(tier);
+  if (numericAmount > maxStakeAmount) {
+    const err = new Error(`Maximum stake amount for your account tier is ${maxStakeAmount} USDT`);
     err.status = 400;
     throw err;
   }
@@ -241,4 +274,6 @@ module.exports = {
   DURATION_PLANS,
   AMOUNT_TIERS,
   MIN_STAKE_AMOUNT,
+  TIER_MAX_STAKE,
+  maxStakeForTier,
 };

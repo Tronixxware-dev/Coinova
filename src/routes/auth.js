@@ -87,7 +87,7 @@ router.post('/signup', async (req, res) => {
     const userResult = await client.query(
       `INSERT INTO users (email, username, password_hash)
        VALUES ($1, $2, $3)
-       RETURNING id, email, username, created_at`,
+       RETURNING id, email, username, tier, created_at`,
       [email, username, passwordHash]
     );
     const user = userResult.rows[0];
@@ -111,7 +111,7 @@ router.post('/signup', async (req, res) => {
     await client.query('COMMIT');
 
     res.status(201).json({
-      user: { id: user.id, email: user.email, username: user.username },
+      user: { id: user.id, email: user.email, username: user.username, isAdmin: false, tier: user.tier },
       accessToken,
       refreshToken,
     });
@@ -138,7 +138,9 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT id, email, username, password_hash, avatar_data_url AS "avatarDataUrl" FROM users WHERE email = $1',
+      `SELECT id, email, username, password_hash, avatar_data_url AS "avatarDataUrl",
+              is_admin AS "isAdmin", is_suspended AS "isSuspended", tier
+       FROM users WHERE email = $1`,
       [email]
     );
     const user = result.rows[0];
@@ -152,6 +154,10 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
+    if (user.isSuspended) {
+      return res.status(403).json({ error: 'Your account has been suspended. Contact support for help.' });
+    }
+
     const accessToken = signAccessToken(user);
     const refreshToken = signRefreshToken(user);
 
@@ -161,7 +167,14 @@ router.post('/login', async (req, res) => {
     );
 
     res.json({
-      user: { id: user.id, email: user.email, username: user.username, avatarDataUrl: user.avatarDataUrl },
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatarDataUrl: user.avatarDataUrl,
+        isAdmin: user.isAdmin,
+        tier: user.tier,
+      },
       accessToken,
       refreshToken,
     });
@@ -194,12 +207,15 @@ router.post('/refresh', async (req, res) => {
       }
 
       const userResult = await pool.query(
-        'SELECT id, email, username FROM users WHERE id = $1',
+        'SELECT id, email, username, is_suspended AS "isSuspended" FROM users WHERE id = $1',
         [decoded.id]
       );
       const user = userResult.rows[0];
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
+      }
+      if (user.isSuspended) {
+        return res.status(403).json({ error: 'Your account has been suspended. Contact support for help.' });
       }
 
       const accessToken = signAccessToken(user);
@@ -242,9 +258,6 @@ router.post('/forgot-password', async (req, res) => {
     const result = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
     const user = result.rows[0];
 
-    // Always return the same generic response whether or not the
-    // email is registered, so this endpoint can't be used to check
-    // which emails have accounts (same reasoning as login's 401s).
     if (user) {
       const rawToken = crypto.randomBytes(32).toString('hex');
       const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
@@ -255,10 +268,6 @@ router.post('/forgot-password', async (req, res) => {
       );
 
       const resetLink = `${FRONTEND_URL}/reset-password?token=${rawToken}`;
-      // No real email provider is wired up for this simulated app —
-      // the reset link is logged here instead. Swap this for an
-      // actual email send (SendGrid, SES, etc.) before this ever
-      // touches real users.
       logger.info(`Password reset requested for ${email} — reset link: ${resetLink}`);
     }
 
@@ -299,9 +308,6 @@ router.post('/reset-password', async (req, res) => {
     const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
     await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, reset.user_id]);
     await client.query('UPDATE password_resets SET used = TRUE WHERE id = $1', [reset.id]);
-    // Same as a manual password change — invalidate every existing
-    // session, since a reset means the old credential is no longer
-    // trusted.
     await client.query('UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1', [reset.user_id]);
 
     await client.query('COMMIT');

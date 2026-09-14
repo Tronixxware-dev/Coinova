@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const Decimal = require('decimal.js');
 const pool = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
@@ -27,6 +28,10 @@ function toPositiveDecimal(value, label) {
     throw new Error(`${label} must be a positive number`);
   }
   return d;
+}
+
+function generateFakeTxHash() {
+  return '0x' + crypto.randomBytes(32).toString('hex'); // purely cosmetic — no real chain involved
 }
 
 async function ensureWallet(client, userId, asset) {
@@ -190,6 +195,94 @@ router.get('/transactions', requireAuth, async (req, res) => {
     res.json({ transactions: result.rows });
   } catch (err) {
     console.error('Transaction history error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/wallet/simulated-send — { asset, toAddress, amount }
+// Locks the amount (moves balance -> locked_balance) and creates a
+// PENDING simulated transaction. No real blockchain transfer happens
+// here — an admin later marks it SENT (finalizes the hold) or FAILED
+// (releases it back to available balance).
+router.post('/simulated-send', requireAuth, async (req, res) => {
+  const asset = typeof req.body.asset === 'string' ? req.body.asset.toUpperCase() : req.body.asset;
+  const toAddress = typeof req.body.toAddress === 'string' ? req.body.toAddress.trim() : '';
+
+  if (!SUPPORTED_ASSETS.includes(asset)) {
+    return res.status(400).json({ error: `Unsupported asset. Choose one of: ${SUPPORTED_ASSETS.join(', ')}` });
+  }
+  if (!toAddress) {
+    return res.status(400).json({ error: 'toAddress is required' });
+  }
+
+  let amount;
+  try {
+    amount = toPositiveDecimal(req.body.amount, 'amount');
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await ensureWallet(client, req.user.id, asset);
+
+    // Same guarded-UPDATE pattern as /withdraw: only succeeds if enough
+    // free balance exists, preventing a race between two simultaneous
+    // sends from over-spending the same balance.
+    const lockResult = await client.query(
+      `UPDATE wallets
+       SET balance = balance - $3, locked_balance = locked_balance + $3
+       WHERE user_id = $1 AND asset = $2 AND balance >= $3
+       RETURNING balance, locked_balance`,
+      [req.user.id, asset, amount.toFixed()]
+    );
+    if (lockResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Insufficient ${asset} balance` });
+    }
+
+    const fakeTxHash = generateFakeTxHash();
+    const txResult = await client.query(
+      `INSERT INTO simulated_transactions (user_id, asset, to_address, amount, status, fake_tx_hash)
+       VALUES ($1, $2, $3, $4, 'PENDING', $5)
+       RETURNING id, asset, to_address, amount, status, fake_tx_hash, created_at`,
+      [req.user.id, asset, toAddress, amount.toFixed(), fakeTxHash]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ transaction: txResult.rows[0], wallet: lockResult.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Simulated send error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/wallet/simulated-transactions — the logged-in user's own
+// simulated send history. Optional ?asset=BTC filter.
+router.get('/simulated-transactions', requireAuth, async (req, res) => {
+  const { asset } = req.query;
+  const conditions = ['user_id = $1'];
+  const params = [req.user.id];
+  if (asset) {
+    params.push(asset.toUpperCase());
+    conditions.push(`asset = $${params.length}`);
+  }
+  try {
+    const result = await pool.query(
+      `SELECT id, asset, to_address, amount, status, fake_tx_hash, created_at, updated_at
+       FROM simulated_transactions
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      params
+    );
+    res.json({ transactions: result.rows });
+  } catch (err) {
+    console.error('Simulated transactions fetch error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
